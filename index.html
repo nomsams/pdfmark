@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>200-Point PDF → Markdown (Robust, Offline)</title>
+<style>
+  :root{
+    --primary:#0d6efd; --primary-600:#0b5ed7; --ok:#198754; --warn:#ffc107; --err:#dc3545;
+    --bg:#0b0f14; --panel:#121822; --muted:#94a3b8; --text:#e2e8f0; --line:#192133;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:1200px;margin:0 auto;padding:16px;display:grid;grid-template-columns:320px 1fr;gap:16px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.25)}
+  .pad{padding:16px}
+  h1,h2{margin:0 0 12px 0}
+  h1{font-size:18px}
+  h2{font-size:16px;border-bottom:1px solid var(--line);padding-bottom:8px}
+  label{display:block;margin:12px 0 6px;font-weight:600}
+  select,input[type="number"]{width:100%;padding:10px;background:#0f1520;color:var(--text);border:1px solid var(--line);border-radius:8px}
+  .btn{width:100%;padding:12px;border:0;border-radius:10px;background:var(--primary);color:#fff;font-weight:700;cursor:pointer}
+  .btn:hover{background:var(--primary-600)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .row{display:flex;gap:8px}
+  .row > .btn{flex:1}
+  .upload{
+    border:2px dashed var(--line);border-radius:12px;padding:14px;text-align:center;cursor:pointer;background:#0f1520
+  }
+  .upload.drag{border-color:var(--primary)}
+  #status{background:#0a0f18;font:12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;color:#b6c2d1;border-radius:8px;padding:12px;height:170px;overflow:auto;white-space:pre-wrap}
+  #out{height:calc(100vh - 210px);min-height:420px;border-radius:10px;border:1px solid var(--line);background:#0a0f18;color:#e5e7eb;padding:12px;font:12.5px/1.5 ui-monospace,Consolas,Menlo,monospace;resize:vertical}
+  .tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  .tag{font-size:11px;border:1px solid var(--line);background:#0f1520;color:#9fb0c3;border-radius:999px;padding:6px 10px}
+  .progress{height:10px;background:#0a0f18;border:1px solid var(--line);border-radius:999px;overflow:hidden}
+  .bar{height:100%;width:0%;background:linear-gradient(90deg,var(--primary),#33c3ff)}
+  .hint{color:#a3b3c8;font-size:12px}
+  .pill{padding:4px 8px;border-radius:6px;border:1px solid var(--line);display:inline-flex;gap:8px;align-items:center}
+  .switch{display:flex;align-items:center;gap:8px}
+  .switch input{width:18px;height:18px}
+  .top-actions{display:flex;gap:8px}
+  .ghost{background:#0f1520;border:1px solid var(--line);color:#cbd5e1}
+  .righthead{display:flex;justify-content:space-between;align-items:center}
+  @media (max-width:1000px){.wrap{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside class="panel pad">
+    <h1>Controls</h1>
+
+    <label for="mode">Conversion Mode</label>
+    <select id="mode">
+      <option value="fast">Fast (heuristics)</option>
+      <option value="enhanced" selected>Enhanced (layout analysis)</option>
+      <option value="ocr">OCR (force OCR for all pages)</option>
+    </select>
+
+    <div class="row" style="margin-top:8px">
+      <div class="switch"><input id="auto-ocr" type="checkbox" checked/><span class="hint">Auto-OCR when page text is sparse</span></div>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <div class="switch"><input id="table-detect" type="checkbox" checked/><span class="hint">Attempt table detection → Markdown tables</span></div>
+    </div>
+
+    <div class="row" style="margin-top:8px">
+      <div class="switch"><input id="merge-hyphens" type="checkbox" checked/><span class="hint">Merge hyphenated line breaks</span></div>
+    </div>
+
+    <label for="scale" style="margin-top:10px">Render Scale (OCR & metrics)</label>
+    <input id="scale" type="number" min="1" max="4" step="0.25" value="2"/>
+
+    <label style="margin-top:12px">Upload PDF</label>
+    <div id="drop" class="upload">Click or Drag & Drop PDF</div>
+    <input id="file" type="file" accept=".pdf" style="display:none"/>
+
+    <div class="row" style="margin-top:12px">
+      <button id="go" class="btn" disabled>Convert</button>
+      <button id="cancel" class="btn ghost" disabled>Cancel</button>
+    </div>
+
+    <label style="margin-top:12px">Progress</label>
+    <div class="progress"><div class="bar" id="bar"></div></div>
+    <div class="tags" id="tags"></div>
+
+    <label style="margin-top:12px">Status Log</label>
+    <div id="status">Awaiting file…</div>
+
+    <p class="hint" style="margin-top:10px">
+      Tips: If a page looks scanned (image only), the converter will automatically OCR it (if enabled). For very complex layouts, “Enhanced” yields best results.
+    </p>
+  </aside>
+
+  <main class="panel pad" style="display:flex;flex-direction:column;">
+    <div class="righthead">
+      <h2 style="margin-bottom:8px">Markdown Output</h2>
+      <div class="top-actions">
+        <button id="copy" class="btn ghost" disabled>Copy</button>
+        <button id="download" class="btn ghost" disabled>Download .md</button>
+      </div>
+    </div>
+    <textarea id="out" readonly placeholder="Output will appear here…"></textarea>
+    <div class="tags" style="margin-top:10px">
+      <span class="tag">Multi-column aware</span>
+      <span class="tag">Paragraph merge</span>
+      <span class="tag">Lists & Headings</span>
+      <span class="tag">Table heuristic</span>
+      <span class="tag">Per-page OCR fallback</span>
+    </div>
+  </main>
+</div>
+
+<!-- pdf.js (pinned to a stable version) -->
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@2.11.338/build/pdf.min.js"></script>
+<!-- tesseract.js (OCR) -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@2.1.5/dist/tesseract.min.js"></script>
+
+<script>
+(function(){
+  // ---------- DOM ----------
+  const elFile = document.getElementById('file');
+  const elDrop = document.getElementById('drop');
+  const elGo = document.getElementById('go');
+  const elCancel = document.getElementById('cancel');
+  const elStatus = document.getElementById('status');
+  const elOut = document.getElementById('out');
+  const elMode = document.getElementById('mode');
+  const elScale = document.getElementById('scale');
+  const elBar = document.getElementById('bar');
+  const elTags = document.getElementById('tags');
+  const elCopy = document.getElementById('copy');
+  const elDownload = document.getElementById('download');
+  const elAutoOCR = document.getElementById('auto-ocr');
+  const elTableDetect = document.getElementById('table-detect');
+  const elMergeHyph = document.getElementById('merge-hyphens');
+
+  let selectedFile = null;
+  let abort = { aborted:false };
+  let ocrWorker = null;
+
+  // ---------- Utils ----------
+  const ts = () => new Date().toLocaleTimeString();
+  function log(msg, level="info"){
+    const color = level==="err" ? "#ff7676" : level==="warn" ? "#ffd36b" : "#b6c2d1";
+    elStatus.innerHTML += `% ${ts()}  ${msg}\n`;
+    elStatus.style.color = color; // subtle last-line color
+    elStatus.scrollTop = elStatus.scrollHeight;
+  }
+  function setBusy(b){
+    elGo.disabled = b || !selectedFile;
+    elCancel.disabled = b;
+    elCopy.disabled = b || !elOut.value;
+    elDownload.disabled = b || !elOut.value;
+    elFile.disabled = b;
+    elMode.disabled = b;
+    elScale.disabled = b;
+    elAutoOCR.disabled = b;
+    elTableDetect.disabled = b;
+    elMergeHyph.disabled = b;
+    elDrop.style.pointerEvents = b?"none":"auto";
+    elGo.textContent = b ? "Processing…" : "Convert";
+  }
+  function setProgress(pct){ elBar.style.width = `${Math.max(0, Math.min(100, pct))}%`; }
+  function resetProgress(){ setProgress(0); elTags.innerHTML=""; }
+  function addTag(t){ const s=document.createElement('span'); s.className='tag'; s.textContent=t; elTags.appendChild(s); }
+
+  function blobToUint8Array(file){ return file.arrayBuffer().then(buf=>new Uint8Array(buf)); }
+
+  // ---------- File Handling ----------
+  elDrop.addEventListener('click',()=>elFile.click());
+  elFile.addEventListener('change', e=>{
+    if(!e.target.files?.length) return;
+    handleFile(e.target.files[0]);
+  });
+  elDrop.addEventListener('dragover', e=>{e.preventDefault(); elDrop.classList.add('drag');});
+  elDrop.addEventListener('dragleave', ()=>elDrop.classList.remove('drag'));
+  elDrop.addEventListener('drop', e=>{
+    e.preventDefault(); elDrop.classList.remove('drag');
+    const f = e.dataTransfer?.files?.[0];
+    if(f) handleFile(f);
+  });
+
+  function handleFile(file){
+    if(file.type !== 'application/pdf'){
+      log("Error: Please choose a PDF file.", "err");
+      return;
+    }
+    selectedFile = file;
+    elDrop.textContent = file.name;
+    log(`Selected: ${file.name}`);
+    elGo.disabled = false;
+  }
+
+  // ---------- PDF.js Setup ----------
+  // Ensure worker is set BEFORE usage
+  try {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@2.11.338/build/pdf.worker.min.js';
+  } catch(e){
+    log("Warning: Failed to set pdf.js workerSrc (will still try).","warn");
+  }
+
+  // ---------- Tesseract Worker ----------
+  async function ensureOCRWorker(){
+    if(ocrWorker) return ocrWorker;
+    log("OCR: initializing worker…");
+    ocrWorker = Tesseract.createWorker({ logger: m=>{
+      if(m?.status && typeof m.progress === 'number'){
+        log(`OCR: ${m.status} ${(m.progress*100).toFixed(0)}%`);
+      }
+    }});
+    await ocrWorker.load();
+    await ocrWorker.loadLanguage('eng');
+    await ocrWorker.initialize('eng');
+    log("OCR: ready.");
+    return ocrWorker;
+  }
+
+  async function ocrCanvas(canvas){
+    await ensureOCRWorker();
+    const res = await ocrWorker.recognize(canvas);
+    return (res && res.data && res.data.text) ? res.data.text : "";
+  }
+
+  // ---------- Layout Heuristics ----------
+  // Convert pdf.js textContent to lines, cluster columns, and shape paragraphs
+  function textContentToMarkdown(textContent, opts){
+    const { tableDetect, mergeHyphens } = opts;
+    const items = textContent.items.map(it => ({
+      str: it.str,
+      x: it.transform[4],
+      y: it.transform[5],
+      w: it.width,
+      // Approximate font size (scale on transform matrix)
+      fs: Math.sqrt(Math.abs(it.transform[0]*it.transform[3])),
+      dir: it.dir || 'ltr',
+      hasEOL: it.hasEOL || false
+    }));
+
+    // Sort by Y desc then X asc (pdf coordinates origin bottom-left)
+    items.sort((a,b)=> b.y - a.y || a.x - b.x);
+
+    // 1) Group into lines (within ~3px Y tolerance)
+    const lines = [];
+    let cur = [];
+    for(const it of items){
+      if(cur.length===0){ cur=[it]; continue; }
+      const last = cur[cur.length-1];
+      if(Math.abs(it.y - last.y) < 3){ cur.push(it); }
+      else { lines.push(cur); cur=[it]; }
+    }
+    if(cur.length) lines.push(cur);
+
+    // Sort each line by X
+    for(const ln of lines){ ln.sort((a,b)=> a.x - b.x); }
+
+    // 2) Column detection: try split into two clusters by X centroid (k=1/2 heuristic)
+    const lineLeftXs = lines.map(ln=> ln.length? ln[0].x : 0);
+    const minX = Math.min(...lineLeftXs), maxX = Math.max(...lineLeftXs);
+    const spread = maxX - minX;
+
+    let left = [], right = [];
+    if(spread > 80 && lines.length > 15){
+      // simple split by midpoint
+      const mid = minX + spread/2;
+      for(const ln of lines){
+        (ln[0].x < mid ? left : right).push(ln);
+      }
+      // If one side too small, treat as single column
+      if(Math.min(left.length, right.length) < 5){
+        left = lines; right = [];
+      } else {
+        addTag("2-column detected");
+      }
+    } else {
+      left = lines; right = [];
+    }
+
+    function linesToParagraphs(LINES){
+      // join items in each line with detected spaces (gap heuristic)
+      const joined = LINES.map(ln=>{
+        let s = "";
+        for(let i=0;i<ln.length;i++){
+          const a = ln[i], b = ln[i+1];
+          s += a.str;
+          if(b){
+            const gap = b.x - (a.x + a.w);
+            // gap-based spacing
+            if(gap > 2) s += " ";
+          }
+        }
+        return { text:s.trim(), y: ln[0]?.y ?? 0, fsAvg: ln.reduce((p,c)=>p+c.fs,0)/ln.length };
+      });
+
+      // Merge lines into paragraphs
+      const paras = [];
+      let curp = [];
+      for(let i=0;i<joined.length;i++){
+        const line = joined[i];
+        if(!line.text){ continue; }
+        curp.push(line);
+        const next = joined[i+1];
+        // paragraph break conditions:
+        const isLast = !next;
+        const hardBreak = !next || (Math.abs(next.y - line.y) > 14); // bigger vertical gap → new paragraph
+        if(hardBreak || isLast){
+          paras.push(curp); curp = [];
+        }
+      }
+      // To Markdown with heuristics (headings, lists, tables)
+      const out = [];
+      for(const para of paras){
+        const lines = para.map(p=>p.text);
+        const fsAvg = para.reduce((p,c)=>p+c.fsAvg,0)/Math.max(1,para.length);
+
+        // Headings: all-caps or large font size
+        if(lines.length===1){
+          const T = lines[0];
+          const isAllCaps = /^[^a-z]+$/.test(T.replace(/[^A-Za-z]/g,''));
+          if(isAllCaps || fsAvg > 12){
+            out.push(`## ${T}`);
+            continue;
+          }
+        }
+
+        // Table heuristic: many lines sharing similar column stops
+        if(tableDetect && lines.length>=3){
+          const splitLines = lines.map(t=> t.split(/\s{2,}/)); // split on 2+ spaces
+          const maxCols = Math.max(...splitLines.map(a=>a.length));
+          if(maxCols>=3){
+            // Check if most rows align to same col counts
+            const dense = splitLines.filter(a=>a.length===maxCols);
+            if(dense.length >= Math.floor(lines.length*0.6)){
+              // Build Markdown table
+              const header = splitLines[0];
+              const md = [];
+              md.push(`| ${header.join(' | ')} |`);
+              md.push(`| ${header.map(()=> '---').join(' | ')} |`);
+              for(let r=1;r<splitLines.length;r++){
+                const row = splitLines[r];
+                md.push(`| ${row.join(' | ')} |`);
+              }
+              out.push(md.join("\n"));
+              addTag("Table → Markdown");
+              continue;
+            }
+          }
+        }
+
+        // Bulleted / numbered lists
+        if(lines.every(t=>/^\s*([•·\-–]|\d+\.)\s+/.test(t))){
+          const md = lines.map(t=>{
+            const m = t.match(/^\s*([•·\-–]|\d+\.)\s+(.*)$/);
+            if(!m) return `- ${t.trim()}`;
+            const bullet = /^\d+\.$/.test(m[1]) ? `1.` : `-`;
+            return `${bullet} ${m[2].trim()}`;
+          });
+          out.push(md.join("\n"));
+          continue;
+        }
+
+        // Join paragraph lines
+        let paraText = lines.join("\n");
+        if(mergeHyphens){
+          // Remove hyphen at line end followed by newline
+          paraText = paraText.replace(/-\n(?=\S)/g,'');
+        }
+        // Merge single newlines within paragraph into spaces (keep blank lines as paragraph breaks)
+        paraText = paraText.replace(/([^\n])\n(?!\n)/g, '$1 ');
+        out.push(paraText.trim());
+      }
+      return out.join("\n\n");
+    }
+
+    const mdLeft = linesToParagraphs(left);
+    const mdRight = right.length ? ("\n\n" + linesToParagraphs(right)) : "";
+    return mdLeft + mdRight;
+  }
+
+  // ---------- Page Processor ----------
+  async function renderPageToCanvas(page, scale){
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently:true });
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    return canvas;
+  }
+
+  function isTextSparse(textContent){
+    // Heuristic: fewer than N items or total string length tiny → likely scanned
+    const items = textContent.items || [];
+    const totalChars = items.reduce((p,c)=>p + (c.str?.length||0), 0);
+    return items.length < 8 || totalChars < 40;
+  }
+
+  function postClean(md){
+    // Tidy extra separators, join duplicated page breaks, normalize spacing
+    md = md.replace(/\n{3,}/g, "\n\n");
+    // Normalize --- separators (keep a clear page fence)
+    md = md.replace(/\n?\s*—{3,}\s*\n/g, "\n\n---\n\n");
+    return md.trim()+"\n";
+  }
+
+  // ---------- Main Conversion ----------
+  elGo.addEventListener('click', async ()=>{
+    if(!selectedFile) return;
+    setBusy(true); abort.aborted=false; resetProgress(); elOut.value="";
+    elStatus.textContent = "Starting conversion…\n";
+    addTag(elMode.value.toUpperCase());
+
+    try{
+      const pdfData = await blobToUint8Array(selectedFile);
+      log("Loading PDF…");
+      const doc = await pdfjsLib.getDocument({ data: pdfData }).promise;
+      log(`PDF loaded (${doc.numPages} pages).`);
+      const total = doc.numPages;
+      let out = "";
+
+      if(elMode.value === 'ocr'){
+        addTag("Force OCR");
+      } else if(elAutoOCR.checked){
+        addTag("Auto-OCR fallback");
+      }
+      if(elTableDetect.checked) addTag("Table detection");
+      if(elMergeHyph.checked) addTag("Hyphen merge");
+
+      for(let i=1;i<=total;i++){
+        if(abort.aborted) throw new Error("Aborted by user");
+        setProgress(((i-1)/total)*100);
+        log(`Page ${i}/${total}: fetching…`);
+        const page = await doc.getPage(i);
+
+        let pageMd = "";
+        const scale = Number(elScale.value) || 2;
+
+        if(elMode.value === 'ocr'){
+          const canvas = await renderPageToCanvas(page, scale);
+          log(`Page ${i}: OCR rendering @ ${scale}x done (${canvas.width}×${canvas.height}).`);
+          const txt = await ocrCanvas(canvas);
+          pageMd = txt.trim();
+        } else {
+          // Try text first
+          const textContent = await page.getTextContent({ normalizeWhitespace:true, disableCombineTextItems:false });
+          const sparse = isTextSparse(textContent);
+          log(`Page ${i}: text items=${textContent.items.length}, sparse=${sparse}`);
+
+          if(sparse && elAutoOCR.checked){
+            const canvas = await renderPageToCanvas(page, scale);
+            log(`Page ${i}: switch to OCR (sparse text). Rendering @ ${scale}x…`);
+            const txt = await ocrCanvas(canvas);
+            pageMd = txt.trim();
+          } else {
+            // Enhanced or fast
+            if(elMode.value === 'enhanced'){
+              pageMd = textContentToMarkdown(textContent, { tableDetect: elTableDetect.checked, mergeHyphens: elMergeHyph.checked });
+            } else {
+              // fast: just join strings with spaces and basic cleanup
+              const raw = textContent.items.map(it=>it.str).join(' ');
+              pageMd = raw.replace(/\s{3,}/g,' ').trim();
+            }
+          }
+        }
+
+        // Page separator
+        out += (pageMd ? pageMd + "\n\n" : "") + "---\n\n";
+        setProgress((i/total)*100);
+      }
+
+      out = postClean(out);
+      elOut.value = out;
+      elCopy.disabled = false;
+      elDownload.disabled = false;
+      log("Done.");
+
+    } catch(err){
+      log(`Fatal: ${err.message}`, "err");
+      console.error(err);
+    } finally {
+      setBusy(false);
+    }
+  });
+
+  // Cancel
+  elCancel.addEventListener('click', ()=>{
+    abort.aborted = true;
+    log("Abort requested…","warn");
+  });
+
+  // Copy / Download
+  elCopy.addEventListener('click', async ()=>{
+    try{
+      await navigator.clipboard.writeText(elOut.value || "");
+      log("Markdown copied to clipboard.", "info");
+    } catch(e){
+      log("Copy failed. Select text and press Ctrl/Cmd+C.","warn");
+    }
+  });
+
+  elDownload.addEventListener('click', ()=>{
+    const blob = new Blob([elOut.value || ""], { type:"text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const base = (selectedFile?.name || "converted").replace(/\.pdf$/i,'');
+    a.href = url; a.download = `${base}.md`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 0);
+  });
+
+  // Cleanup OCR worker on unload
+  window.addEventListener('beforeunload', async ()=>{
+    try{ if(ocrWorker){ await ocrWorker.terminate(); } } catch{}
+  });
+})();
+</script>
+</body>
+</html>
